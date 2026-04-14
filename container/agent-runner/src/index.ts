@@ -513,6 +513,7 @@ async function runQuery(
         'mcp__nanoclaw__*',
         'mcp__googlecalendar__*',
         'mcp__kiwi__*',
+        'mcp__gmail__*',
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -538,6 +539,10 @@ async function runQuery(
         kiwi: {
           type: 'http' as const,
           url: 'https://mcp.kiwi.com',
+        },
+        gmail: {
+          command: 'npx',
+          args: ['-y', '@gongrzhe/server-gmail-autoauth-mcp'],
         },
       },
       hooks: {
