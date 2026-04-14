@@ -512,6 +512,7 @@ async function runQuery(
         'NotebookEdit',
         'mcp__nanoclaw__*',
         'mcp__googlecalendar__*',
+        'mcp__kiwi__*',
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -533,6 +534,9 @@ async function runQuery(
           env: {
             HOME: '/home/node',
           },
+        },
+        kiwi: {
+          url: 'https://mcp.kiwi.com',
         },
       },
       hooks: {
