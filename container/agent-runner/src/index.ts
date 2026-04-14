@@ -536,6 +536,7 @@ async function runQuery(
           },
         },
         kiwi: {
+          type: 'http' as const,
           url: 'https://mcp.kiwi.com',
         },
       },
