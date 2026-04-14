@@ -4,6 +4,7 @@
  */
 import { ChildProcess, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
@@ -228,6 +229,16 @@ function buildVolumeMounts(
     containerPath: '/app/src',
     readonly: false,
   });
+
+  // Google Calendar MCP credentials — mount read-only if present
+  const calendarMcpDir = path.join(os.homedir(), '.calendar-mcp');
+  if (fs.existsSync(path.join(calendarMcpDir, 'credentials.json'))) {
+    mounts.push({
+      hostPath: calendarMcpDir,
+      containerPath: '/home/node/.calendar-mcp',
+      readonly: true,
+    });
+  }
 
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
