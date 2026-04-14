@@ -135,9 +135,9 @@ export class WhatsAppChannel implements Channel {
           );
           return proto.Message.fromObject({ conversation: content });
         }
-        // Return empty message rather than undefined — prevents indefinite
-        // "waiting for this message" when we genuinely don't have the content.
-        return proto.Message.fromObject({});
+        // Return undefined — tells Baileys we genuinely don't have this message.
+        // An empty proto object confuses recipients; undefined stops the retry.
+        return undefined;
       },
     });
 
