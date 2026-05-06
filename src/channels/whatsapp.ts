@@ -30,6 +30,7 @@ import {
   GROUPS_DIR,
   STORE_DIR,
 } from '../config.js';
+import { readEnvFile } from '../env.js';
 import {
   getLastGroupSync,
   getMessageContentById,
@@ -199,6 +200,28 @@ export class WhatsAppChannel implements Channel {
           }
         }
 
+        // Seed LID→phone mappings from env so Baileys can encrypt for
+        // participants whose LID it can't resolve via signalRepository.
+        // Format: LID_PHONE_MAP=LID1:PHONE1,LID2:PHONE2
+        const lidPhoneMap =
+          process.env.LID_PHONE_MAP ||
+          readEnvFile(['LID_PHONE_MAP']).LID_PHONE_MAP;
+        if (lidPhoneMap) {
+          for (const entry of lidPhoneMap.split(',')) {
+            const [lid, phone] = entry.trim().split(':');
+            if (lid && phone) {
+              const phoneJid = phone.includes('@')
+                ? phone
+                : `${phone}@s.whatsapp.net`;
+              this.setLidPhoneMapping(lid, phoneJid);
+            }
+          }
+          logger.info(
+            { count: lidPhoneMap.split(',').length },
+            'Seeded LID→phone mappings from LID_PHONE_MAP',
+          );
+        }
+
         // Flush any messages queued while disconnected
         this.flushOutgoingQueue().catch((err) =>
           logger.error({ err }, 'Failed to flush outgoing queue'),
@@ -325,7 +348,8 @@ export class WhatsAppChannel implements Channel {
                 const attachDir = path.join(groupDir, 'attachments');
                 fs.mkdirSync(attachDir, { recursive: true });
                 const filename = path.basename(
-                  normalized.documentMessage.fileName || `doc-${Date.now()}.pdf`,
+                  normalized.documentMessage.fileName ||
+                    `doc-${Date.now()}.pdf`,
                 );
                 const filePath = path.join(attachDir, filename);
                 fs.writeFileSync(filePath, buffer as Buffer);
