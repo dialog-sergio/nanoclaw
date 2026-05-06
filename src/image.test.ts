@@ -50,7 +50,7 @@ describe('image processing', () => {
 
       expect(result).not.toBeNull();
       expect(result!.content).toMatch(
-        /^\[Image: attachments\/img-\d+-[a-z0-9]+\.jpg\] Check this out$/,
+        /^Check this out \[Image: attachments\/img-\d+-[a-z0-9]+\.jpg\]$/,
       );
       expect(result!.relativePath).toMatch(
         /^attachments\/img-\d+-[a-z0-9]+\.jpg$/,

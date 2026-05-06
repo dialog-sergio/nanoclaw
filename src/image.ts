@@ -43,8 +43,10 @@ export async function processImage(
   fs.writeFileSync(filePath, resized);
 
   const relativePath = `attachments/${filename}`;
+  // Caption goes first so trigger words (e.g. "@Waco") stay at position 0
+  // for the trigger regex check that expects them at the start of the message.
   const content = caption
-    ? `[Image: ${relativePath}] ${caption}`
+    ? `${caption} [Image: ${relativePath}]`
     : `[Image: ${relativePath}]`;
 
   return { content, relativePath };
