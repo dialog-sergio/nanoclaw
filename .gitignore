@@ -38,3 +38,4 @@ groups/global/*
 agents-sdk-docs
 test-results/
 .nanoclaw-migrations/v1-data/
+.nanoclaw-migrations/guide.md
