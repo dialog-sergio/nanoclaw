@@ -238,15 +238,40 @@ export async function processTaskIpc(
           }
           nextRun = new Date(Date.now() + ms).toISOString();
         } else if (scheduleType === 'once') {
-          const date = new Date(data.schedule_value);
-          if (isNaN(date.getTime())) {
+          // schedule_value is local time without timezone suffix (e.g. "2026-04-19T20:05:00").
+          // Convert to UTC using the configured TIMEZONE, not the process timezone,
+          // so it's correct even if launchd runs without TZ env var.
+          const localStr = data.schedule_value as string;
+          // Parse as UTC first (append Z to prevent local-time interpretation)
+          const asUtc = new Date(localStr + 'Z');
+          if (isNaN(asUtc.getTime())) {
             logger.warn(
               { scheduleValue: data.schedule_value },
               'Invalid timestamp',
             );
             break;
           }
-          nextRun = date.toISOString();
+          // Find what local time this UTC instant corresponds to in TIMEZONE
+          const parts = new Intl.DateTimeFormat('en-US', {
+            timeZone: TIMEZONE,
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false,
+          }).formatToParts(asUtc);
+          const get = (t: string) =>
+            parts.find((p) => p.type === t)?.value || '0';
+          const localAtUtc = new Date(
+            `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}:${get('second')}Z`,
+          );
+          // Offset = how far ahead local is from UTC
+          const offsetMs = localAtUtc.getTime() - asUtc.getTime();
+          // Subtract offset: "20:05 local" with +1h offset → 19:05 UTC
+          const corrected = new Date(asUtc.getTime() - offsetMs);
+          nextRun = corrected.toISOString();
         }
 
         const taskId =
