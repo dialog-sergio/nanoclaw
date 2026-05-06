@@ -65,6 +65,7 @@ import { startSessionCleanup } from './session-cleanup.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { parseImageReferences } from './image.js';
+import { runIntegrationHealthChecks } from './integration-health.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -640,6 +641,10 @@ async function main(): Promise<void> {
   initDatabase();
   logger.info('Database initialized');
   loadState();
+
+  // Fire-and-forget: surfaces broken integration tokens/ACLs/API-version drift
+  // in host logs at boot instead of silently 404ing on first use.
+  void runIntegrationHealthChecks();
 
   // Ensure OneCLI agents exist for all registered groups.
   // Recovers from missed creates (e.g. OneCLI was down at registration time).
