@@ -33,6 +33,7 @@ export class SlackChannel implements Channel {
 
   private app: App;
   private botUserId: string | undefined;
+  private botId: string | undefined;
   private connected = false;
   private outgoingQueue: Array<{ jid: string; text: string }> = [];
   private flushing = false;
@@ -62,7 +63,36 @@ export class SlackChannel implements Channel {
       logLevel: LogLevel.ERROR,
     });
 
+    // Handle connection errors — mark disconnected so messages get queued
+    if (typeof this.app.error === 'function') {
+      this.app.error(async (error) => {
+        logger.error({ err: error }, 'Slack app error');
+      });
+    }
+
     this.setupEventHandlers();
+
+    // Periodic health check — detect silent connection drops
+    setInterval(async () => {
+      if (!this.connected) return;
+      try {
+        await this.app.client.auth.test();
+      } catch (err) {
+        logger.warn({ err }, 'Slack health check failed, reconnecting');
+        this.connected = false;
+        try {
+          await this.app.stop();
+        } catch {
+          /* ignore stop errors */
+        }
+        try {
+          await this.connect();
+          logger.info('Slack reconnected after health check failure');
+        } catch (reconnectErr) {
+          logger.error({ err: reconnectErr }, 'Slack reconnection failed');
+        }
+      }
+    }, 60_000);
   }
 
   private setupEventHandlers(): void {
@@ -94,8 +124,7 @@ export class SlackChannel implements Channel {
       const groups = this.opts.registeredGroups();
       if (!groups[jid]) return;
 
-      const isBotMessage =
-        !!msg.bot_id || msg.user === this.botUserId;
+      const isBotMessage = !!msg.bot_id || msg.user === this.botUserId;
 
       let senderName: string;
       if (isBotMessage) {
@@ -107,14 +136,19 @@ export class SlackChannel implements Channel {
           'unknown';
       }
 
-      // Translate Slack <@UBOTID> mentions into TRIGGER_PATTERN format.
-      // Slack encodes @mentions as <@U12345>, which won't match TRIGGER_PATTERN
-      // (e.g., ^@<ASSISTANT_NAME>\b), so we prepend the trigger when the bot is @mentioned.
+      // Translate Slack <@ID> mentions into TRIGGER_PATTERN format.
+      // Slack encodes @mentions as <@U12345> or <@B12345> (bot ID), which
+      // won't match TRIGGER_PATTERN (e.g., ^@Scout\b), so we prepend the
+      // group's trigger when the bot is @mentioned.
       let content = msg.text;
-      if (this.botUserId && !isBotMessage) {
-        const mentionPattern = `<@${this.botUserId}>`;
-        if (content.includes(mentionPattern) && !TRIGGER_PATTERN.test(content)) {
-          content = `@${ASSISTANT_NAME} ${content}`;
+      if (!isBotMessage) {
+        const isMention =
+          (this.botUserId && content.includes(`<@${this.botUserId}>`)) ||
+          (this.botId && content.includes(`<@${this.botId}>`));
+        if (isMention && !TRIGGER_PATTERN.test(content)) {
+          const group = groups[jid];
+          const trigger = group?.trigger || `@${ASSISTANT_NAME}`;
+          content = `${trigger} ${content}`;
         }
       }
 
@@ -140,12 +174,13 @@ export class SlackChannel implements Channel {
     try {
       const auth = await this.app.client.auth.test();
       this.botUserId = auth.user_id as string;
-      logger.info({ botUserId: this.botUserId }, 'Connected to Slack');
-    } catch (err) {
-      logger.warn(
-        { err },
-        'Connected to Slack but failed to get bot user ID',
+      this.botId = auth.bot_id as string | undefined;
+      logger.info(
+        { botUserId: this.botUserId, botId: this.botId },
+        'Connected to Slack',
       );
+    } catch (err) {
+      logger.warn({ err }, 'Connected to Slack but failed to get bot user ID');
     }
 
     this.connected = true;
@@ -245,9 +280,7 @@ export class SlackChannel implements Channel {
     }
   }
 
-  private async resolveUserName(
-    userId: string,
-  ): Promise<string | undefined> {
+  private async resolveUserName(userId: string): Promise<string | undefined> {
     if (!userId) return undefined;
 
     const cached = this.userNameCache.get(userId);

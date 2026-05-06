@@ -40,7 +40,9 @@ vi.mock('@slack/bolt', () => ({
 
     client = {
       auth: {
-        test: vi.fn().mockResolvedValue({ user_id: 'U_BOT_123' }),
+        test: vi
+          .fn()
+          .mockResolvedValue({ user_id: 'U_BOT_123', bot_id: 'B_BOT_456' }),
       },
       chat: {
         postMessage: vi.fn().mockResolvedValue(undefined),
@@ -132,7 +134,9 @@ function currentApp() {
   return appRef.current;
 }
 
-async function triggerMessageEvent(event: ReturnType<typeof createMessageEvent>) {
+async function triggerMessageEvent(
+  event: ReturnType<typeof createMessageEvent>,
+) {
   const handler = currentApp().eventHandlers.get('message');
   if (handler) await handler({ event });
 }
@@ -309,7 +313,10 @@ describe('SlackChannel', () => {
       const channel = new SlackChannel(opts);
       await channel.connect();
 
-      const event = createMessageEvent({ user: 'U_BOT_123', text: 'Self message' });
+      const event = createMessageEvent({
+        user: 'U_BOT_123',
+        text: 'Self message',
+      });
       await triggerMessageEvent(event);
 
       expect(opts.onMessage).toHaveBeenCalledWith(
@@ -391,13 +398,17 @@ describe('SlackChannel', () => {
       await channel.connect();
 
       // First message — API call
-      await triggerMessageEvent(createMessageEvent({ user: 'U_USER_456', text: 'First' }));
+      await triggerMessageEvent(
+        createMessageEvent({ user: 'U_USER_456', text: 'First' }),
+      );
       // Second message — should use cache
-      await triggerMessageEvent(createMessageEvent({
-        user: 'U_USER_456',
-        text: 'Second',
-        ts: '1704067201.000000',
-      }));
+      await triggerMessageEvent(
+        createMessageEvent({
+          user: 'U_USER_456',
+          text: 'Second',
+          ts: '1704067201.000000',
+        }),
+      );
 
       expect(currentApp().client.users.info).toHaveBeenCalledTimes(1);
     });
@@ -407,7 +418,9 @@ describe('SlackChannel', () => {
       const channel = new SlackChannel(opts);
       await channel.connect();
 
-      currentApp().client.users.info.mockRejectedValueOnce(new Error('API error'));
+      currentApp().client.users.info.mockRejectedValueOnce(
+        new Error('API error'),
+      );
 
       const event = createMessageEvent({ user: 'U_UNKNOWN', text: 'Hi' });
       await triggerMessageEvent(event);
@@ -495,6 +508,25 @@ describe('SlackChannel', () => {
       );
     });
 
+    it('prepends trigger when bot is @mentioned via bot ID format', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect(); // sets botId to 'B_BOT_456'
+
+      const event = createMessageEvent({
+        text: '<@B_BOT_456> you good?',
+        user: 'U_USER_456',
+      });
+      await triggerMessageEvent(event);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({
+          content: '@Jonesy <@B_BOT_456> you good?',
+        }),
+      );
+    });
+
     it('does not prepend trigger when trigger pattern already matches', async () => {
       const opts = createTestOpts();
       const channel = new SlackChannel(opts);
@@ -532,6 +564,34 @@ describe('SlackChannel', () => {
         'slack:C0123456789',
         expect.objectContaining({
           content: 'Echo: <@U_BOT_123>',
+        }),
+      );
+    });
+
+    it('uses the group-specific trigger, not the global assistant name', async () => {
+      const opts = createTestOpts({
+        registeredGroups: vi.fn(() => ({
+          'slack:C0123456789': {
+            name: 'Scout Channel',
+            folder: 'slack_scout',
+            trigger: '@Scout',
+            added_at: '2024-01-01T00:00:00.000Z',
+          },
+        })),
+      });
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      const event = createMessageEvent({
+        text: '<@B_BOT_456> are you there?',
+        user: 'U_USER_456',
+      });
+      await triggerMessageEvent(event);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({
+          content: '@Scout <@B_BOT_456> are you there?',
         }),
       );
     });
@@ -812,17 +872,13 @@ describe('SlackChannel', () => {
       const channel = new SlackChannel(opts);
 
       // First page returns a cursor; second page returns no cursor
-      currentApp().client.conversations.list
-        .mockResolvedValueOnce({
-          channels: [
-            { id: 'C001', name: 'general', is_member: true },
-          ],
+      currentApp()
+        .client.conversations.list.mockResolvedValueOnce({
+          channels: [{ id: 'C001', name: 'general', is_member: true }],
           response_metadata: { next_cursor: 'cursor_page2' },
         })
         .mockResolvedValueOnce({
-          channels: [
-            { id: 'C002', name: 'random', is_member: true },
-          ],
+          channels: [{ id: 'C002', name: 'random', is_member: true }],
           response_metadata: {},
         });
 
@@ -830,7 +886,8 @@ describe('SlackChannel', () => {
 
       // Should have called conversations.list twice (once per page)
       expect(currentApp().client.conversations.list).toHaveBeenCalledTimes(2);
-      expect(currentApp().client.conversations.list).toHaveBeenNthCalledWith(2,
+      expect(currentApp().client.conversations.list).toHaveBeenNthCalledWith(
+        2,
         expect.objectContaining({ cursor: 'cursor_page2' }),
       );
 
