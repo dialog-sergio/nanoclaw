@@ -14,6 +14,7 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
+  NOTION_API_KEY,
   ONECLI_URL,
   TIMEZONE,
 } from './config.js';
@@ -242,13 +243,27 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // Google Calendar MCP credentials — mount read-only if present
-  const calendarMcpDir = path.join(os.homedir(), '.calendar-mcp');
-  if (fs.existsSync(path.join(calendarMcpDir, 'credentials.json'))) {
+  // Google Calendar MCP credentials — mount read-write so token refresh persists
+  const calendarMcpDir = path.join(
+    os.homedir(),
+    '.config',
+    'google-calendar-mcp',
+  );
+  if (fs.existsSync(path.join(calendarMcpDir, 'tokens.json'))) {
     mounts.push({
       hostPath: calendarMcpDir,
-      containerPath: '/home/node/.calendar-mcp',
-      readonly: true,
+      containerPath: '/home/node/.config/google-calendar-mcp',
+      readonly: false,
+    });
+  }
+
+  // Google Sheets MCP credentials — mount read-write so token refresh persists
+  const sheetsMcpDir = path.join(os.homedir(), '.config', 'google-sheets-mcp');
+  if (fs.existsSync(path.join(sheetsMcpDir, 'token.json'))) {
+    mounts.push({
+      hostPath: sheetsMcpDir,
+      containerPath: '/home/node/.config/google-sheets-mcp',
+      readonly: false,
     });
   }
 
@@ -275,6 +290,14 @@ async function buildContainerArgs(
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
+  // Pass Notion API key if configured (not managed by OneCLI)
+  if (NOTION_API_KEY) {
+    args.push('-e', `NOTION_API_KEY=${NOTION_API_KEY}`);
+  }
+
+  // Browser MCP (Playwright) now runs inside each container as a stdio server,
+  // so no host-side URL or service management is needed.
+
   // OneCLI gateway handles credential injection — containers never see real secrets.
   // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
   const onecliApplied = await onecli.applyContainerConfig(args, {
@@ -283,6 +306,15 @@ async function buildContainerArgs(
   });
   if (onecliApplied) {
     logger.info({ containerName }, 'OneCLI gateway config applied');
+    // Exclude Google APIs from the OneCLI proxy — Gmail/Calendar MCPs use their own
+    // local OAuth credentials and must reach Google directly. The proxy intercepts
+    // and breaks those calls.
+    args.push(
+      '-e',
+      'NO_PROXY=googleapis.com,accounts.google.com,oauth2.googleapis.com,*.googleapis.com,api.notion.com,host.docker.internal',
+      '-e',
+      'no_proxy=googleapis.com,accounts.google.com,oauth2.googleapis.com,*.googleapis.com,api.notion.com,host.docker.internal',
+    );
   } else {
     logger.warn(
       { containerName },

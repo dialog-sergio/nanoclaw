@@ -34,6 +34,7 @@ interface ContainerInput {
   assistantName?: string;
   script?: string;
   imageAttachments?: Array<{ relativePath: string; mediaType: string }>;
+  mcpServers?: string[]; // MCP server names to enable. Omit for all.
 }
 
 interface ImageContentBlock {
@@ -111,6 +112,18 @@ class MessageStream {
   end(): void {
     this.done = true;
     this.waiting?.();
+  }
+
+  /** Drain any messages pushed after the SDK stopped reading. */
+  drainRemaining(): string[] {
+    const messages: string[] = [];
+    while (this.queue.length > 0) {
+      const msg = this.queue.shift()!;
+      if (typeof msg.message.content === 'string') {
+        messages.push(msg.message.content);
+      }
+    }
+    return messages;
   }
 
   async *[Symbol.asyncIterator](): AsyncGenerator<SDKUserMessage> {
@@ -342,13 +355,19 @@ function drainIpcInput(): string[] {
       .sort();
 
     const messages: string[] = [];
+    if (files.length > 0) {
+      log(`drainIpcInput: found ${files.length} file(s): ${files.join(', ')}`);
+    }
     for (const file of files) {
       const filePath = path.join(IPC_INPUT_DIR, file);
       try {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
         fs.unlinkSync(filePath);
         if (data.type === 'message' && data.text) {
+          log(`drainIpcInput: consumed ${file} (${data.text.length} chars)`);
           messages.push(data.text);
+        } else {
+          log(`drainIpcInput: dropped ${file} (type=${data.type}, hasText=${!!data.text})`);
         }
       } catch (err) {
         log(
@@ -391,6 +410,27 @@ function waitForIpcMessage(): Promise<string | null> {
 }
 
 /**
+ * Filter MCP servers by an allowlist. If no allowlist is provided, return all.
+ * 'nanoclaw' is always included (core messaging/scheduling tools).
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function filterMcpServers(
+  allowlist: string[] | undefined,
+  servers: Record<string, any>,
+): Record<string, any> {
+  if (!allowlist || allowlist.length === 0) return servers;
+  const allowed = new Set([...allowlist, 'nanoclaw']); // nanoclaw is always on
+  const filtered: Record<string, any> = {};
+  for (const [name, config] of Object.entries(servers)) {
+    if (allowed.has(name)) filtered[name] = config;
+  }
+  log(
+    `MCP servers: ${Object.keys(filtered).join(', ')} (filtered from ${Object.keys(servers).join(', ')})`,
+  );
+  return filtered;
+}
+
+/**
  * Run a single query and stream results via writeOutput.
  * Uses MessageStream (AsyncIterable) to keep isSingleUserTurn=false,
  * allowing agent teams subagents to run to completion.
@@ -407,6 +447,7 @@ async function runQuery(
   newSessionId?: string;
   lastAssistantUuid?: string;
   closedDuringQuery: boolean;
+  pendingMessages: string[];
 }> {
   const stream = new MessageStream();
   stream.push(prompt);
@@ -514,12 +555,16 @@ async function runQuery(
         'mcp__googlecalendar__*',
         'mcp__kiwi__*',
         'mcp__gmail__*',
+        'mcp__notion__*',
+        'mcp__browser__*',
+        'mcp__sheets__*',
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       settingSources: ['project', 'user'],
-      mcpServers: {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mcpServers: filterMcpServers(containerInput.mcpServers, {
         nanoclaw: {
           command: 'node',
           args: [mcpServerPath],
@@ -530,10 +575,17 @@ async function runQuery(
           },
         },
         googlecalendar: {
-          command: 'node',
-          args: ['/app/node_modules/@gongrzhe/server-calendar-autoauth-mcp/build/index.js'],
+          command: 'google-calendar-mcp',
+          args: [],
           env: {
+            ...process.env,
             HOME: '/home/node',
+            GOOGLE_OAUTH_CREDENTIALS:
+              '/home/node/.config/google-calendar-mcp/gcp-oauth.keys.json',
+            HTTP_PROXY: '',
+            HTTPS_PROXY: '',
+            http_proxy: '',
+            https_proxy: '',
           },
         },
         kiwi: {
@@ -541,10 +593,56 @@ async function runQuery(
           url: 'https://mcp.kiwi.com',
         },
         gmail: {
-          command: 'npx',
-          args: ['-y', '@gongrzhe/server-gmail-autoauth-mcp'],
+          command: 'gmail-mcp',
+          args: [],
+          env: {
+            ...process.env,
+            HOME: '/home/node',
+            HTTP_PROXY: '',
+            HTTPS_PROXY: '',
+            http_proxy: '',
+            https_proxy: '',
+          },
         },
-      },
+        sheets: {
+          command: 'mcp-google-sheets',
+          args: [],
+          env: {
+            ...process.env,
+            HOME: '/home/node',
+            CREDENTIALS_PATH:
+              '/home/node/.config/google-sheets-mcp/credentials.json',
+            TOKEN_PATH: '/home/node/.config/google-sheets-mcp/token.json',
+            HTTP_PROXY: '',
+            HTTPS_PROXY: '',
+            http_proxy: '',
+            https_proxy: '',
+          },
+        },
+        browser: {
+          command: 'playwright-mcp',
+          args: ['--headless', '--executable-path', '/usr/bin/chromium'],
+        },
+        ...(process.env.NOTION_API_KEY
+          ? {
+              notion: {
+                command: 'notion-mcp-server',
+                args: [],
+                env: {
+                  // NOTION_TOKEN (not OPENAPI_MCP_HEADERS) lets the MCP server
+                  // pick the Notion-Version that matches its bundled OpenAPI
+                  // spec. Override here and it will silently drift when the
+                  // pinned server version in the Dockerfile bumps.
+                  NOTION_TOKEN: process.env.NOTION_API_KEY,
+                  HTTP_PROXY: '',
+                  HTTPS_PROXY: '',
+                  http_proxy: '',
+                  https_proxy: '',
+                },
+              },
+            }
+          : {}),
+      }),
       hooks: {
         PreCompact: [
           { hooks: [createPreCompactHook(containerInput.assistantName)] },
@@ -598,10 +696,24 @@ async function runQuery(
   }
 
   ipcPolling = false;
+
+  // Drain any messages that pollIpcDuringQuery pushed to the stream after
+  // the SDK stopped reading. This closes a race where an IPC file arrives
+  // between the SDK finishing and ipcPolling being set to false — the file
+  // gets consumed and pushed to the stream, but no one reads it.
+  const unconsumed = stream.drainRemaining();
+  // Also drain IPC input directory for files that arrived after polling stopped
+  const lateMessages = drainIpcInput();
+
   log(
-    `Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`,
+    `Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}, unconsumed: ${unconsumed.length}, late: ${lateMessages.length}`,
   );
-  return { newSessionId, lastAssistantUuid, closedDuringQuery };
+  return {
+    newSessionId,
+    lastAssistantUuid,
+    closedDuringQuery,
+    pendingMessages: [...unconsumed, ...lateMessages],
+  };
 }
 
 interface ScriptResult {
@@ -763,6 +875,16 @@ async function main(): Promise<void> {
       if (queryResult.closedDuringQuery) {
         log('Close sentinel consumed during query, exiting');
         break;
+      }
+
+      // If messages were consumed by pollIpcDuringQuery after the SDK
+      // stopped reading, feed them directly into the next query.
+      if (queryResult.pendingMessages.length > 0) {
+        log(
+          `${queryResult.pendingMessages.length} pending message(s) from race window, starting next query immediately`,
+        );
+        prompt = queryResult.pendingMessages.join('\n');
+        continue;
       }
 
       // Emit session update so host can track it

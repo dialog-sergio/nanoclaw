@@ -16,6 +16,8 @@ vi.mock('./config.js', () => ({
   IDLE_TIMEOUT: 1800000, // 30min
   ONECLI_URL: 'http://localhost:10254',
   TIMEZONE: 'America/Los_Angeles',
+  NOTION_API_KEY: '',
+  BROWSER_MCP_PORT: '',
 }));
 
 // Mock logger

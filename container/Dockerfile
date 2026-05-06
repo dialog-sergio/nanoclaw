@@ -34,6 +34,14 @@ ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 # Install agent-browser and claude-code globally
 RUN npm install -g agent-browser @anthropic-ai/claude-code
 
+# Pre-install MCP servers globally to avoid npx download timeout at runtime
+RUN npm install -g \
+    @gongrzhe/server-gmail-autoauth-mcp@1.1.11 \
+    @cocal/google-calendar-mcp@2.6.1 \
+    @notionhq/notion-mcp-server@2.2.1 \
+    mcp-google-sheets@2.0.1 \
+    @playwright/mcp@0.0.70
+
 # Create app directory
 WORKDIR /app
 

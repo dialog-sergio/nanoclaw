@@ -9,6 +9,8 @@ const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
   'ONECLI_URL',
+  'NOTION_API_KEY',
+  'BROWSER_MCP_PORT',
   'TZ',
 ]);
 
@@ -94,3 +96,11 @@ function resolveConfigTimezone(): string {
   return 'UTC';
 }
 export const TIMEZONE = resolveConfigTimezone();
+
+// Notion API key for container agents (passed as env var, not via OneCLI)
+export const NOTION_API_KEY =
+  process.env.NOTION_API_KEY || envConfig.NOTION_API_KEY;
+
+// Browser MCP (Playwright) — runs on the host, containers connect via HTTP
+export const BROWSER_MCP_PORT =
+  process.env.BROWSER_MCP_PORT || envConfig.BROWSER_MCP_PORT || '';
