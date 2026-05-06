@@ -78,6 +78,12 @@ let messageLoopRunning = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+// Per-group idle timer reset functions — lets the message loop reset
+// the idle timer when piping follow-up messages to an active container.
+const idleTimerResets = new Map<string, () => void>();
+// Per-group timestamp of the latest piped message — cursor advances to
+// this value only when the container completes successfully.
+const pendingPipedTimestamps = new Map<string, string>();
 
 const onecli = new OneCLI({ url: ONECLI_URL });
 
@@ -240,8 +246,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (missedMessages.length === 0) return true;
 
-  // For non-main groups, check if trigger is required and present
-  if (!isMainGroup && group.requiresTrigger !== false) {
+  // Check trigger unless the group explicitly opts out.
+  // Main groups default to no trigger, but can opt in by setting requiresTrigger: true.
+  const needsTriggerHere = isMainGroup
+    ? group.requiresTrigger === true
+    : group.requiresTrigger !== false;
+  if (needsTriggerHere) {
     const triggerPattern = getTriggerPattern(group.trigger);
     const allowlistCfg = loadSenderAllowlist();
     const hasTrigger = missedMessages.some(
@@ -255,12 +265,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const prompt = formatMessages(missedMessages, TIMEZONE);
   const imageAttachments = parseImageReferences(missedMessages);
 
-  // Advance cursor so the piping path in startMessageLoop won't re-fetch
-  // these messages. Save the old cursor so we can roll back on error.
+  // Save current cursor for reference. Do NOT advance yet — cursor only
+  // advances after output is confirmed delivered to the user, or the agent
+  // completes successfully. This prevents message loss when containers die.
   const previousCursor = lastAgentTimestamp[chatJid] || '';
-  lastAgentTimestamp[chatJid] =
-    missedMessages[missedMessages.length - 1].timestamp;
-  saveState();
+  const batchTimestamp = missedMessages[missedMessages.length - 1].timestamp;
 
   logger.info(
     { group: group.name, messageCount: missedMessages.length },
@@ -281,9 +290,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }, IDLE_TIMEOUT);
   };
 
+  // Expose reset so the message loop can extend the timer when piping follow-ups
+  idleTimerResets.set(chatJid, resetIdleTimer);
+
   await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
+  // Tracks the latest timestamp of piped follow-up messages.
+  // Used to advance the cursor to the correct point on completion.
+  let pipedTimestamp: string | undefined;
 
   const output = await runAgent(
     group,
@@ -303,13 +318,25 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         if (text) {
           await channel.sendMessage(chatJid, text);
           outputSentToUser = true;
+          // Advance cursor now — output confirmed delivered to user
+          lastAgentTimestamp[chatJid] = pipedTimestamp || batchTimestamp;
+          saveState();
+        } else if (raw.length > 0) {
+          logger.warn(
+            { group: group.name, rawLength: raw.length },
+            'Agent response was entirely <internal> tags — nothing sent to user',
+          );
         }
-        // Only reset idle timer on actual results, not session-update markers (result: null)
-        resetIdleTimer();
       }
 
       if (result.status === 'success') {
         queue.notifyIdle(chatJid);
+        // Start idle timer only when the agent finishes its turn (session
+        // marker: status=success, result=null). Text results mean the agent
+        // just responded — it may still be mid-task with more work ahead.
+        if (!result.result) {
+          resetIdleTimer();
+        }
       }
 
       if (result.status === 'error') {
@@ -320,25 +347,44 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
+  idleTimerResets.delete(chatJid);
+
+  // Capture and clear the piped timestamp — if any follow-up messages
+  // were piped to this container, include them in the cursor advance.
+  pipedTimestamp = pendingPipedTimestamps.get(chatJid);
+  pendingPipedTimestamps.delete(chatJid);
 
   if (output === 'error' || hadError) {
-    // If we already sent output to the user, don't roll back the cursor —
-    // the user got their response and re-processing would send duplicates.
     if (outputSentToUser) {
+      // Cursor already advanced when output was sent — don't roll back
       logger.warn(
         { group: group.name },
-        'Agent error after output was sent, skipping cursor rollback to prevent duplicates',
+        'Agent error after output was sent, cursor already advanced',
       );
       return true;
     }
-    // Roll back cursor so retries can re-process these messages
-    lastAgentTimestamp[chatJid] = previousCursor;
-    saveState();
+    // No output was sent and agent errored — cursor was never advanced,
+    // so messages will be re-fetched on retry. Just log.
     logger.warn(
       { group: group.name },
-      'Agent error, rolled back message cursor for retry',
+      'Agent error, cursor not advanced — messages will be reprocessed',
     );
     return false;
+  }
+
+  // Agent completed successfully. Advance cursor if not already done
+  // (handles the case where agent processed but sent no visible output,
+  // e.g. intentionally silent completion or internal-only response).
+  const finalTimestamp = pipedTimestamp || batchTimestamp;
+  if (lastAgentTimestamp[chatJid] !== finalTimestamp) {
+    lastAgentTimestamp[chatJid] = finalTimestamp;
+    saveState();
+    if (!outputSentToUser) {
+      logger.info(
+        { group: group.name },
+        'Agent completed without visible output — cursor advanced',
+      );
+    }
   }
 
   return true;
@@ -402,6 +448,9 @@ async function runAgent(
         isMain,
         assistantName: ASSISTANT_NAME,
         ...(imageAttachments.length > 0 && { imageAttachments }),
+        ...(group.containerConfig?.mcpServers && {
+          mcpServers: group.containerConfig.mcpServers,
+        }),
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -495,12 +544,14 @@ async function startMessageLoop(): Promise<void> {
           }
 
           const isMainGroup = group.isMain === true;
-          const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
+          const needsTrigger = isMainGroup
+            ? group.requiresTrigger === true
+            : group.requiresTrigger !== false;
 
-          // For non-main groups, only act on trigger messages.
-          // Non-trigger messages accumulate in DB and get pulled as
-          // context when a trigger eventually arrives.
-          if (needsTrigger) {
+          // For non-main groups, only act on trigger messages — unless a
+          // container is already active, in which case pipe everything through
+          // so the user can converse naturally without repeating the trigger.
+          if (needsTrigger && !queue.isActive(chatJid)) {
             const triggerPattern = getTriggerPattern(group.trigger);
             const allowlistCfg = loadSenderAllowlist();
             const hasTrigger = groupMessages.some(
@@ -529,9 +580,15 @@ async function startMessageLoop(): Promise<void> {
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
             );
-            lastAgentTimestamp[chatJid] =
-              messagesToSend[messagesToSend.length - 1].timestamp;
-            saveState();
+            // Do NOT advance cursor here — piped messages may not be
+            // processed if the container dies. Track the timestamp so
+            // processGroupMessages can advance it on successful completion.
+            pendingPipedTimestamps.set(
+              chatJid,
+              messagesToSend[messagesToSend.length - 1].timestamp,
+            );
+            // Reset idle timer — the agent is about to receive new work
+            idleTimerResets.get(chatJid)?.();
             // Show typing indicator while the container processes the piped message
             channel
               .setTyping?.(chatJid, true)

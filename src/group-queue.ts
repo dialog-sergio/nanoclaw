@@ -145,6 +145,10 @@ export class GroupQueue {
    * Mark the container as idle-waiting (finished work, waiting for IPC input).
    * If tasks are pending, preempt the idle container immediately.
    */
+  isActive(groupJid: string): boolean {
+    return this.getGroup(groupJid).active;
+  }
+
   notifyIdle(groupJid: string): void {
     const state = this.getGroup(groupJid);
     state.idleWaiting = true;
@@ -171,8 +175,13 @@ export class GroupQueue {
       const tempPath = `${filepath}.tmp`;
       fs.writeFileSync(tempPath, JSON.stringify({ type: 'message', text }));
       fs.renameSync(tempPath, filepath);
+      logger.info(
+        { groupJid, filepath, textLength: text.length },
+        'IPC message file written',
+      );
       return true;
-    } catch {
+    } catch (err) {
+      logger.error({ groupJid, err }, 'Failed to write IPC message file');
       return false;
     }
   }

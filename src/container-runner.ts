@@ -455,8 +455,16 @@ export async function runContainerAgent(
               newSessionId = parsed.newSessionId;
             }
             hadStreamingOutput = true;
-            // Activity detected — reset the hard timeout
-            resetTimeout();
+            // Activity detected — reset the hard timeout.
+            // Session markers (result: null, status: success) mean the agent
+            // finished its turn and is idle. Switch to IDLE_TIMEOUT.
+            // Actual text results mean the agent is actively working — keep
+            // the full timeout so long tool-use phases aren't killed.
+            const isIdleMarker =
+              parsed.status === 'success' && parsed.result === null;
+            resetTimeout(
+              isIdleMarker ? true : !!parsed.result ? false : undefined,
+            );
             // Call onOutput for all markers (including null results)
             // so idle timers start even for "silent" query completions.
             outputChain = outputChain.then(() => onOutput(parsed));
@@ -518,10 +526,16 @@ export async function runContainerAgent(
 
     let timeout = setTimeout(killOnTimeout, timeoutMs);
 
-    // Reset the timeout whenever there's activity (streaming output)
-    const resetTimeout = () => {
+    // Reset the timeout whenever there's activity (streaming output).
+    // Use IDLE_TIMEOUT only when the agent signals it's idle (session marker
+    // with null result). For actual text results, keep the full timeout since
+    // the agent may be mid-task with long tool-use phases ahead.
+    let agentIdle = false;
+    const resetTimeout = (idle?: boolean) => {
       clearTimeout(timeout);
-      timeout = setTimeout(killOnTimeout, timeoutMs);
+      agentIdle = idle ?? agentIdle;
+      const t = agentIdle ? IDLE_TIMEOUT : timeoutMs;
+      timeout = setTimeout(killOnTimeout, t);
     };
 
     container.on('close', (code) => {
@@ -541,6 +555,9 @@ export async function runContainerAgent(
             `Duration: ${duration}ms`,
             `Exit Code: ${code}`,
             `Had Streaming Output: ${hadStreamingOutput}`,
+            ``,
+            `=== Stderr${stderrTruncated ? ' (TRUNCATED)' : ''} ===`,
+            stderr,
           ].join('\n'),
         );
 
